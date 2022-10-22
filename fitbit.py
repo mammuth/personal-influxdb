@@ -337,7 +337,7 @@ fetch_data('activities', 'minutesLightlyActive')
 fetch_data('activities', 'minutesFairlyActive')
 fetch_data('activities', 'minutesVeryActive')
 fetch_data('activities', 'calories')
-fetch_data('activities', 'activityCalories') # todo this one times out when using 1y period...
+# fetch_data('activities', 'activityCalories') # todo this one times out when using 1y period...
 fetch_data('body', 'weight')
 fetch_data('body', 'fat')
 fetch_data('body', 'bmi')
