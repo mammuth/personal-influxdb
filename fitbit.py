@@ -22,14 +22,29 @@ if not FITBIT_CLIENT_ID or not FITBIT_CLIENT_SECRET:
     sys.exit(1)
 points = []
 
-def fetch_data(category, type):
+# todo use this in more methods?
+def _get(url):
     try:
-        response = requests.get(f'https://api.fitbit.com/1/user/-/{category}/{type}/date/today/1d.json', 
+        response = requests.get(url, 
             headers={'Authorization': f'Bearer {FITBIT_ACCESS_TOKEN}', 'Accept-Language': FITBIT_LANGUAGE})
         response.raise_for_status()
+        return response
     except requests.exceptions.HTTPError as err:
         logging.error("HTTP request failed: %s", err)
+        if err.response.status_code == 429:
+            # todo didn't test this yet
+            retry_seconds = err.response.headers['Fitbit-Rate-Limit-Reset']
+            retry_mins = retry_seconds * 60 if retry_seconds else '¯\_(ツ)_/¯'
+            logging.error(f'You hit Fitbits rate limiting. You can try it again in {retry_mins} minutes. https://dev.fitbit.com/build/reference/web-api/developer-guide/application-design/#Rate-Limits')
+        else:
+            logging.error(err.response.text)
         sys.exit(1)
+
+def fetch_data(category, type, end_date=None):
+    date = end_date.strftime('%Y-%m-%d') if end_date else 'today'
+    url = f'https://api.fitbit.com/1/user/-/{category}/{type}/date/{date}/1y.json'
+    
+    response = _get(url)
 
     data = response.json()
     logging.info(f"Got {type} from Fitbit")
@@ -43,9 +58,18 @@ def fetch_data(category, type):
                 }
             })
 
-def fetch_heartrate(date):
+
+def fetch_heartrate(date, intraday_api=True):
+    # it uses the intraday API with 1m resolution for heart rate data. 
+    # Unset intraday_api if you want to use the daily summary API to reduce rate limits
+
+    if intraday_api is True:
+        url = f'https://api.fitbit.com/1/user/-/activities/heart/date/{date.strftime("%Y-%m-%d")}/1d/1min.json'
+    else:
+        url = f'https://api.fitbit.com/1/user/-/activities/heart/date/{date.strftime("%Y-%m-%d")}/1m.json'
     try:
-        response = requests.get(f'https://api.fitbit.com/1/user/-/activities/heart/date/{date}/1d/1min.json', 
+        # todo not do 1d but 1y? might time out I guess...
+        response = requests.get(url, 
             headers={'Authorization': f'Bearer {FITBIT_ACCESS_TOKEN}', 'Accept-Language': FITBIT_LANGUAGE})
         response.raise_for_status()
     except requests.exceptions.HTTPError as err:
@@ -54,6 +78,10 @@ def fetch_heartrate(date):
 
     data = response.json()
     logging.info("Got heartrates from Fitbit")
+
+    if 'activities-heart' not in data:
+        logging.info(f'Skipping date {date}, it seems to have no heart rate data...')
+        return
 
     for day in data['activities-heart']:
         if 'restingHeartRate' in day['value']:
@@ -239,63 +267,65 @@ for device in data:
         }
     })
 
-end = date.today()
-start = end - timedelta(days=1)
+# todo move sleep to function
+def fetch_sleep():
+    end = date.today()
+    start = end - timedelta(days=30)
 
-try:
-    response = requests.get(f'https://api.fitbit.com/1.2/user/-/sleep/date/{start.isoformat()}/{end.isoformat()}.json',
-        headers={'Authorization': f'Bearer {FITBIT_ACCESS_TOKEN}', 'Accept-Language': FITBIT_LANGUAGE})
-    response.raise_for_status()
-except requests.exceptions.HTTPError as err:
-    logging.error("HTTP request failed: %s", err)
-    sys.exit(1)
+    try:
+        response = requests.get(f'https://api.fitbit.com/1.2/user/-/sleep/date/{start.isoformat()}/{end.isoformat()}.json',
+            headers={'Authorization': f'Bearer {FITBIT_ACCESS_TOKEN}', 'Accept-Language': FITBIT_LANGUAGE})
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as err:
+        logging.error("HTTP request failed: %s", err)
+        sys.exit(1)
 
-data = response.json()
-logging.info("Got sleep sessions from Fitbit")
+    data = response.json()
+    logging.info("Got sleep sessions from Fitbit")
 
-for day in data['sleep']:
-    time = datetime.fromisoformat(day['startTime'])
-    utc_time = LOCAL_TIMEZONE.localize(time).astimezone(pytz.utc).isoformat()
-    if day['type'] == 'stages':
-        points.append({
-            "measurement": "sleep",
-            "time": utc_time,
-            "fields": {
-                "duration": int(day['duration']),
-                "efficiency": int(day['efficiency']),
-                "is_main_sleep": bool(day['isMainSleep']),
-                "minutes_asleep": int(day['minutesAsleep']),
-                "minutes_awake": int(day['minutesAwake']),
-                "time_in_bed": int(day['timeInBed']),
-                "minutes_deep": int(day['levels']['summary']['deep']['minutes']),
-                "minutes_light": int(day['levels']['summary']['light']['minutes']),
-                "minutes_rem": int(day['levels']['summary']['rem']['minutes']),
-                "minutes_wake": int(day['levels']['summary']['wake']['minutes']),
-            }
-        })
-    else:
-        points.append({
-            "measurement": "sleep",
-            "time": utc_time,
-            "fields": {
-                "duration": int(day['duration']),
-                "efficiency": int(day['efficiency']),
-                "is_main_sleep": bool(day['isMainSleep']),
-                "minutes_asleep": int(day['minutesAsleep']),
-                "minutes_awake": int(day['minutesAwake']),
-                "time_in_bed": int(day['timeInBed']),
-                "minutes_deep": 0,
-                "minutes_light": int(day['levels']['summary']['asleep']['minutes']),
-                "minutes_rem": int(day['levels']['summary']['restless']['minutes']),
-                "minutes_wake": int(day['levels']['summary']['awake']['minutes']),
-            }
-        })
-    
-    if 'data' in day['levels']:
-        process_levels(day['levels']['data'])
-    
-    if 'shortData' in day['levels']:
-        process_levels(day['levels']['shortData'])
+    for day in data['sleep']:
+        time = datetime.fromisoformat(day['startTime'])
+        utc_time = LOCAL_TIMEZONE.localize(time).astimezone(pytz.utc).isoformat()
+        if day['type'] == 'stages':
+            points.append({
+                "measurement": "sleep",
+                "time": utc_time,
+                "fields": {
+                    "duration": int(day['duration']),
+                    "efficiency": int(day['efficiency']),
+                    "is_main_sleep": bool(day['isMainSleep']),
+                    "minutes_asleep": int(day['minutesAsleep']),
+                    "minutes_awake": int(day['minutesAwake']),
+                    "time_in_bed": int(day['timeInBed']),
+                    "minutes_deep": int(day['levels']['summary']['deep']['minutes']),
+                    "minutes_light": int(day['levels']['summary']['light']['minutes']),
+                    "minutes_rem": int(day['levels']['summary']['rem']['minutes']),
+                    "minutes_wake": int(day['levels']['summary']['wake']['minutes']),
+                }
+            })
+        else:
+            points.append({
+                "measurement": "sleep",
+                "time": utc_time,
+                "fields": {
+                    "duration": int(day['duration']),
+                    "efficiency": int(day['efficiency']),
+                    "is_main_sleep": bool(day['isMainSleep']),
+                    "minutes_asleep": int(day['minutesAsleep']),
+                    "minutes_awake": int(day['minutesAwake']),
+                    "time_in_bed": int(day['timeInBed']),
+                    "minutes_deep": 0,
+                    "minutes_light": int(day['levels']['summary']['asleep']['minutes']),
+                    "minutes_rem": int(day['levels']['summary']['restless']['minutes']),
+                    "minutes_wake": int(day['levels']['summary']['awake']['minutes']),
+                }
+            })
+        
+        if 'data' in day['levels']:
+            process_levels(day['levels']['data'])
+        
+        if 'shortData' in day['levels']:
+            process_levels(day['levels']['shortData'])
 
 fetch_data('activities', 'steps')
 fetch_data('activities', 'distance')
@@ -307,13 +337,58 @@ fetch_data('activities', 'minutesLightlyActive')
 fetch_data('activities', 'minutesFairlyActive')
 fetch_data('activities', 'minutesVeryActive')
 fetch_data('activities', 'calories')
-fetch_data('activities', 'activityCalories')
+fetch_data('activities', 'activityCalories') # todo this one times out when using 1y period...
 fetch_data('body', 'weight')
 fetch_data('body', 'fat')
 fetch_data('body', 'bmi')
 fetch_data('foods/log', 'water')
 fetch_data('foods/log', 'caloriesIn')
-fetch_heartrate(date.today().isoformat())
+fetch_heartrate(date.today())
 fetch_activities((date.today() + timedelta(days=1)).isoformat())
+fetch_sleep()
 
-write_points(points)
+
+# todo: bug: it also writes values for future dates in the running year...
+def initial_timeseries_import(start_year):
+    global points
+
+    for year in range(start_year, date.today().year + 1):
+        logging.info(f'Importing {year}...')
+        end_date = datetime(year, 12, 31)
+
+        fetch_data('activities', 'steps', end_date)
+        # fetch_data('activities', 'floors', end_date)
+        fetch_data('activities', 'distance', end_date)
+        # fetch_data('activities', 'elevation', end_date)
+        fetch_data('activities', 'distance', end_date)
+        fetch_data('activities', 'minutesSedentary', end_date)
+        fetch_data('activities', 'minutesLightlyActive', end_date)
+        fetch_data('activities', 'minutesFairlyActive', end_date)
+        fetch_data('activities', 'minutesVeryActive', end_date)
+        write_points(points)
+        points = []
+        fetch_data('activities', 'calories', end_date)
+        # fetch_data('activities', 'activityCalories') # todo this one times out when using 1y period.., end_date.
+        fetch_data('body', 'weight', end_date)
+        fetch_data('body', 'fat', end_date)
+        fetch_data('body', 'bmi', end_date)
+
+        write_points(points)
+        points = []
+
+        for month in range(1, date.today().month + 1):
+            fetch_heartrate(datetime(year, month, 1), intraday_api=False)
+    
+        write_points(points)
+        points = []
+
+
+initial_timeseries_import(2021)
+
+
+# todo missing data
+# - HRV
+# - VO2 Max
+# - breathing rate
+# - SpO2
+# - ... 
