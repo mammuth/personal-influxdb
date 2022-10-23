@@ -212,9 +212,11 @@ def fetch_activities(date):
 connect(FITBIT_DATABASE)
 
 if not FITBIT_ACCESS_TOKEN:
-    if os.path.isfile('.fitbit-refreshtoken'):
-        f = open(".fitbit-refreshtoken", "r")
-        token = f.read()
+    script_dir = os.path.dirname(__file__)
+    refresh_token_path = os.path.join(script_dir, '.fitbit-refreshtoken')
+    if os.path.isfile(refresh_token_path):
+        f = open(refresh_token_path, "r")
+        token = f.read().strip()
         f.close()
         response = requests.post('https://api.fitbit.com/oauth2/token',
             data={
@@ -232,12 +234,16 @@ if not FITBIT_ACCESS_TOKEN:
                 "code": FITBIT_INITIAL_CODE
             }, auth=(FITBIT_CLIENT_ID, FITBIT_CLIENT_SECRET))
 
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as err:
+        logging.error('Token request response: %s', err.response.text)
+        raise err
 
     json = response.json()
     FITBIT_ACCESS_TOKEN = json['access_token']
     refresh_token = json['refresh_token']
-    f = open(".fitbit-refreshtoken", "w+")
+    f = open(refresh_token_path, "w+")
     f.write(refresh_token)
     f.close()
 
@@ -247,6 +253,7 @@ try:
     response.raise_for_status()
 except requests.exceptions.HTTPError as err:
     logging.error("HTTP request failed: %s", err)
+    logging.error(err.response.text)
     sys.exit(1)
 
 data = response.json()
@@ -347,6 +354,9 @@ fetch_heartrate(date.today())
 fetch_activities((date.today() + timedelta(days=1)).isoformat())
 fetch_sleep()
 
+write_points(points)
+points = []
+
 
 # todo: bug: it also writes values for future dates in the running year...
 def initial_timeseries_import(start_year):
@@ -383,7 +393,7 @@ def initial_timeseries_import(start_year):
         points = []
 
 
-initial_timeseries_import(2021)
+# initial_timeseries_import(2021)
 
 
 # todo missing data
